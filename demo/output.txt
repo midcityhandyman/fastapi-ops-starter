@@ -1,0 +1,106 @@
+fastapi-ops-starter demo (offline, SQLite, synthetic data)
+
+== 1. Readiness before and after the migration script ==
+GET /readyz -> 503 not_ready, pending: ['001_records', '002_jobs_and_outbox', '003_record_enrichment']
+  applied 001_records
+  applied 002_jobs_and_outbox
+  applied 003_record_enrichment
+GET /readyz -> 200 ready
+GET /healthz -> 200 ok
+
+== 2. API key auth ==
+GET /v1/records with no key      -> 401
+GET /v1/records with a wrong key -> 401
+GET /v1/records with the key     -> 200
+
+== 3. Ingest 24 seed events from four sources ==
+  POST /v1/ingest/call     x6 -> 201 created
+  POST /v1/ingest/email    x6 -> 201 created
+  POST /v1/ingest/sms      x6 -> 201 created
+  POST /v1/ingest/webform  x6 -> 201 created
+
+== 4. Replays and bad payloads ==
+same webform event again -> 200 duplicate (no new row)
+sms without required fields -> 422
+  problem: message_sid: Field required
+  problem: from: Field required
+  problem: timestamp: Field required
+unknown source 'fax' -> 404
+
+== 5. Background jobs ==
+queue before: {'queued': 25}
+worker ran 33 jobs
+queue after:  {'dead': 1, 'done': 32}
+by kind:      {'enrich_record': 24, 'notify': 8, 'send_fax': 1}
+dead job: kind=send_fax attempts=1 error=PermanentJobError: no handler registered for kind 'send_fax'
+
+== 6. One record table, whatever the source ==
+source   event_type        pri    contact                                        tags
+sms      message_received  normal +12025550111                                   scheduling
+webform  form_submission   normal Alex Sample / +12025550101                     quote
+call     call_answered     normal Sam Fixture / +12025550121                     quote,scheduling
+email    email_received    normal Drew Specimen / drew.specimen@example.com      quote
+webform  form_submission   high   Jordan Example / +12025550102                  urgent
+email    email_received    normal billing@vendor.example.com                     billing
+call     call_missed       high   +12025550122                                   callback
+webform  form_submission   normal Casey Placeholder / casey.placeholder@example.com scheduling
+sms      message_received  normal +12025550112                                   billing
+call     voicemail_left    high   Jamie Synthetic / +12025550123                 callback,scheduling
+sms      message_received  normal +12025550101                                   quote
+call     call_answered     normal (unknown)                                      
+email    email_received    high   Quinn Dummy / quinn.dummy@example.com          complaint
+webform  form_submission   normal Riley Demo / +12025550104                      quote
+sms      message_received  high   +12025550113                                   urgent
+email    email_received    normal Avery Stand-In / avery.standin@example.com     scheduling
+webform  form_submission   high   Morgan Testcase / +12025550105                 complaint
+call     call_answered     normal Jordan Example / +12025550102                  billing
+call     call_missed       high   +12025550124                                   callback
+sms      message_received  normal +12025550114                                   
+webform  form_submission   normal Taylor Mock / taylor.mock@example.com          scheduling
+email    email_received    normal Reese Mockup / reese.mockup@example.com        
+email    email_received    high   Parker Sample / parker.sample@example.com      urgent
+sms      message_received  normal +12025550115                                   billing
+
+== 7. One record in full ==
+{
+  "source": "webform",
+  "external_id": "wf-1002",
+  "event_type": "form_submission",
+  "occurred_at": "2026-11-02T18:40:12+00:00",
+  "contact": {
+    "name": "Jordan Example",
+    "phone": "+12025550102",
+    "email": "jordan@example.com"
+  },
+  "summary": "[contact form] Urgent: water is leaking under the kitchen sink and I need someone right away.",
+  "priority": "high",
+  "tags": [
+    "urgent"
+  ],
+  "jobs": [
+    "enrich_record: done",
+    "notify: done"
+  ]
+}
+
+== 8. Stats and the notification outbox (mock notifier, nothing sent) ==
+records by source:   {'call': 6, 'email': 6, 'sms': 6, 'webform': 6}
+records by priority: {'high': 8, 'normal': 16}
+outbox rows: 8 (mock notifier holds 8)
+  [mock] High priority call_missed from +12025550122
+  [mock] High priority call_missed from +12025550124
+  [mock] High priority email_received from Parker Sample
+  [mock] High priority email_received from Quinn Dummy
+  [mock] High priority form_submission from Jordan Example
+  [mock] High priority form_submission from Morgan Testcase
+  [mock] High priority message_received from +12025550113
+  [mock] High priority voicemail_left from Jamie Synthetic
+
+== 9. Structured log lines (sample, ids and timings vary per run) ==
+{"ts": "<varies>", "level": "INFO", "logger": "ops.access", "msg": "request", "request_id": "<varies>", "method": "GET", "path": "/v1/records", "status": 401, "duration_ms": "<varies>", "api_key": null}
+{"ts": "<varies>", "level": "INFO", "logger": "ops.access", "msg": "request", "request_id": "<varies>", "method": "POST", "path": "/v1/ingest/webform", "status": 201, "duration_ms": "<varies>", "api_key": "demo-client"}
+{"ts": "<varies>", "level": "INFO", "logger": "ops.jobs", "msg": "job done", "job_id": "<varies>", "kind": "enrich_record", "attempt": 1}
+{"ts": "<varies>", "level": "ERROR", "logger": "ops.jobs", "msg": "job dead", "job_id": "<varies>", "kind": "send_fax", "attempt": 1, "error": "no handler registered for kind 'send_fax'"}
+(117 log lines in total)
+
+Demo finished.
