@@ -1,16 +1,56 @@
 # fastapi-ops-starter
 
-A small service business gets events from a web form, a text line, a phone system and an inbox, each in its own shape, and nobody has one place to look.
-This is the slim API that sits in front of all of them: one keyed ingestion endpoint, one record table, and background jobs that act on what arrives.
+[![ci](https://github.com/midcityhandyman/fastapi-ops-starter/actions/workflows/ci.yml/badge.svg)](https://github.com/midcityhandyman/fastapi-ops-starter/actions/workflows/ci.yml)
+
+**One place to see every inbound contact.** A small service business hears from customers through a web form, a text line, a phone system and an inbox. Each one sends a different shape, so enquiries get missed, counted twice or answered late.
+
+This is the small backend that sits in front of all four, for a developer starting the operations side of a business like that:
+
+- Every channel posts to one endpoint, and every event becomes one row with the same fields: who, when, what kind, a summary, and the original payload.
+- A webhook that is delivered twice is stored once.
+- Urgent messages, complaints and missed calls are marked high priority and raise an alert. That work runs as a background job that retries when it fails and is parked where you can see it when it cannot succeed.
+- The records, the job queue, the failures and the alerts are all readable through the same API.
+
+Built with FastAPI, SQLAlchemy Core and plain SQL migrations. It runs on SQLite with no setup and on Postgres. It is a starter, not a finished product: the four payload shapes are invented, and alerts go to a mock unless you configure a webhook. [Limitations](#limitations) says exactly what is and is not proven.
+
+## What you will see
+
+`python demo/run_demo.py` runs the real app offline against a throwaway SQLite file. These lines are copied from its captured output, [`demo/output.txt`](demo/output.txt). CI runs the demo on every push and fails if the output differs from that file.
+
+```text
+== 3. Ingest 24 seed events from four sources ==
+  POST /v1/ingest/call     x6 -> 201 created
+  POST /v1/ingest/email    x6 -> 201 created
+  POST /v1/ingest/sms      x6 -> 201 created
+  POST /v1/ingest/webform  x6 -> 201 created
+
+== 4. Replays and bad payloads ==
+same webform event again -> 200 duplicate (no new row)
+sms without required fields -> 422
+  problem: message_sid: Field required
+
+== 5. Background jobs ==
+queue before: {'queued': 25}
+worker ran 33 jobs
+queue after:  {'dead': 1, 'done': 32}
+by kind:      {'enrich_record': 24, 'notify': 8, 'send_fax': 1}
+
+source   event_type        pri    contact                                        tags
+webform  form_submission   normal Alex Sample / +12025550101                     quote
+webform  form_submission   high   Jordan Example / +12025550102                  urgent
+call     call_missed       high   +12025550122                                   callback
+```
+
+The one `dead` job is deliberate: the demo queues a `send_fax` job that has no handler, to show where a job that cannot succeed ends up. All names, numbers and addresses are synthetic.
 
 ## What it does
 
-- **API key auth.** Every `/v1` route needs a key (`X-API-Key` or `Authorization: Bearer`). Keys are stored and compared as SHA-256 digests in constant time, and the log shows the key's name, never the key.
-- **Ingestion that normalises.** `POST /v1/ingest/{source}` accepts the source's own payload (`webform`, `sms`, `call`, `email`) and writes one row to `records` with the same fields every time: who, when (UTC), what kind of event, a summary, and the untouched original in `raw`.
-- **Idempotent by design.** `(source, external_id)` is unique. A replayed webhook returns `200 duplicate` and creates nothing.
-- **Background jobs without a broker.** Jobs are rows in the same database, written in the same transaction as the record. A worker thread claims them, retries with exponential backoff, and parks hopeless ones as `dead` where you can see and retry them.
-- **Health and readiness.** `/healthz` says the process is up. `/readyz` checks the database, pending migrations and the worker heartbeat, and returns 503 with the reason when any of them fail.
-- **Structured logging.** One JSON object per line, with a request id that is accepted from `X-Request-ID` or generated, and echoed back on the response.
+- **API key auth.** Every `/v1` route needs a key (`X-API-Key` or `Authorization: Bearer`). Keys are held as SHA-256 digests and compared in constant time, and the log shows the key's name, never the key.
+- **Ingestion that normalises.** `POST /v1/ingest/{source}` accepts the source's own payload (`webform`, `sms`, `call`, `email`) and writes one row to `records`: contact name, phone and email, time in UTC, event type, a summary, and the untouched original in `raw`.
+- **Idempotent ingest.** `(source, external_id)` is unique in the database. A replayed webhook returns `200 duplicate` and creates nothing.
+- **Background jobs without a broker.** Jobs are rows in the same database, written in the same transaction as the record. A worker thread claims them, retries with exponential backoff, and moves jobs that are out of attempts to `dead`, where you can read the error and retry them through the API.
+- **Health and readiness.** `/healthz` says the process is up. `/readyz` checks the database, pending migrations and the in process worker's heartbeat, and returns 503 with the reason when any of them fail.
+- **Structured logging.** One JSON object per line, with a request id that is taken from `X-Request-ID` or generated, and echoed back on the response.
 - **A migration script.** Plain SQL files, applied in order, tracked with checksums. The same files run on SQLite and Postgres.
 - **Seeded fake events.** 24 synthetic events across the four sources, loaded through the real ingestion path.
 
@@ -56,15 +96,17 @@ flowchart LR
 
 ## Run it
 
-Python 3.12, nothing else. No `.env` is needed for a local run.
+Python 3.12 and nothing else. No `.env` is needed for a local run.
 
 ```bash
+python -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 python scripts/migrate.py --seed
 python -m app serve
 ```
 
-The server listens on `http://127.0.0.1:8000`. With no `OPS_API_KEYS` set and `APP_ENV` not `production`, it accepts the development key `dev-local-key` and says so in the log. Then:
+The server listens on `http://127.0.0.1:8000`. With no `OPS_API_KEYS` set and `APP_ENV` not `production`, it accepts the development key `dev-local-key` and says so in the log. In another terminal:
 
 ```bash
 curl http://127.0.0.1:8000/readyz
@@ -74,7 +116,7 @@ curl -H "X-API-Key: dev-local-key" -H "Content-Type: application/json" \
   http://127.0.0.1:8000/v1/ingest/sms
 ```
 
-Interactive API docs are at `/docs`.
+The first returns `"status":"ready"`, the second the 8 high priority seed records, the third `"status":"created"` (and `"duplicate"` if you send it again). About a second later `GET /v1/stats` shows one more high priority record and one more outbox row. Interactive API docs are at `/docs`.
 
 ### Endpoints
 
@@ -120,7 +162,7 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-76 tests, about three seconds, no network and no keys. They cover auth on every `/v1` route, each normaliser, idempotent ingest, batch ingest, record filters, job retry and backoff with a fake clock, rollback of a failed handler's writes, stale job recovery, the live worker thread, the migration runner (ordering, checksums, schema matching the table definitions), readiness, config parsing, log format and the seed data.
+86 tests, no network and no keys; the run takes a few seconds. They cover auth on every `/v1` route, each normaliser, idempotent ingest, batch ingest, record filters, job retry and backoff with a fake clock, rollback of a failed handler's writes, stale job recovery, the live worker thread, the migration runner (ordering, checksums, schema matching the table definitions), readiness, config parsing, log format, the seed data, and that the excerpt at the top of this file matches the captured demo output.
 
 To run the same suite against Postgres, point `TEST_DATABASE_URL` at an empty database (the tests drop and recreate their tables):
 
@@ -129,7 +171,7 @@ pip install -r requirements-postgres.txt
 TEST_DATABASE_URL=postgresql://ops:password@localhost:5432/ops_test python -m pytest
 ```
 
-CI (`.github/workflows/ci.yml`) runs the suite on SQLite, runs the demo, and runs the suite again on a Postgres 16 service container.
+CI (`.github/workflows/ci.yml`) runs the suite on SQLite, runs the demo and compares it with `demo/output.txt`, and runs the suite again on a Postgres 16 service container.
 
 ## Demo
 
@@ -137,22 +179,7 @@ CI (`.github/workflows/ci.yml`) runs the suite on SQLite, runs the demo, and run
 python demo/run_demo.py
 ```
 
-The demo runs the real app in process against a throwaway SQLite file, fully offline. It shows readiness failing before the migration and passing after, auth rejecting bad keys, 24 events from four sources landing in one table, a replay being recognised, a bad payload being rejected with reasons, the worker draining the queue (including one job that goes to `dead`), and a sample of the JSON log lines. Captured output is in [`demo/output.txt`](demo/output.txt); `python demo/run_demo.py --save` regenerates it.
-
-A slice of that output:
-
-```text
-== 4. Replays and bad payloads ==
-same webform event again -> 200 duplicate (no new row)
-sms without required fields -> 422
-  problem: message_sid: Field required
-
-== 5. Background jobs ==
-queue before: {'queued': 25}
-worker ran 33 jobs
-queue after:  {'dead': 1, 'done': 32}
-by kind:      {'enrich_record': 24, 'notify': 8, 'send_fax': 1}
-```
+The demo runs the real app in process against a throwaway SQLite file, fully offline. It shows readiness failing before the migration and passing after, auth rejecting bad keys, 24 events from four sources landing in one table, a replay being recognised, a bad payload being rejected with reasons, the worker draining the queue (including one job that goes to `dead`), and a sample of the JSON log lines. It talks to the app through FastAPI's test client and drives the worker by hand so the output is in a fixed order; the HTTP server and the worker thread are exercised by the steps under [Run it](#run-it). Captured output is in [`demo/output.txt`](demo/output.txt); `python demo/run_demo.py --save` regenerates it.
 
 ## Project layout
 
@@ -177,20 +204,34 @@ demo/               run_demo.py, output.txt
 tests/
 ```
 
-## Where this pattern runs
+## Background
 
-This starter is drawn from systems that run two small service companies day to day. There, the same shape (keyed ingestion from the phone, text, form and inbox channels into one record table, with database backed jobs doing the follow up work) is what lets a small team see every inbound contact in one place and trust that nothing was dropped or counted twice. The code here is a clean rewrite of the pattern with synthetic data; nothing from those systems is included.
+The shape (keyed ingestion from form, text, phone and inbox into one record table, with database backed jobs doing the follow up) is one the author uses in day to day systems for small service businesses. This repository is a clean rewrite of that pattern with synthetic data. Nothing from those systems is included, and this code itself has not served production traffic.
 
 ## Limitations
 
-- **The triage is keyword rules.** `enrich.py` flags "leak" and "urgent"; it will miss things and it will flag things it should not. It is a placeholder for whatever classification you actually need.
-- **Jobs are at least once.** A handler can run twice after a crash, so handlers must be safe to repeat. The webhook notifier in particular can deliver a duplicate if the process dies between the POST and the commit.
-- **The queue is a table, polled.** Fine for tens of jobs a second with a one second poll. It is not a replacement for a real broker at high volume, and there is no priority or scheduling beyond `run_after`.
-- **SQLite is for the demo.** It works with the in process worker, but it has one writer at a time. Use Postgres for anything with more than one process.
-- **Postgres was tested, not load tested.** The full suite passed against Postgres 16 in a local container, and the CI workflow has a job that repeats that on every push. Nothing here has been run under concurrent production load, and the claim step uses a conditional UPDATE rather than `SKIP LOCKED`.
+What is mocked or invented:
+
+- **The four payload shapes are invented.** `webform`, `sms`, `call` and `email` are plausible JSON shapes, not any provider's real webhook format. No real form tool, SMS gateway, phone system or mail service has ever posted to this API. Real providers often send form encoded bodies and sign their requests; expect to write a normaliser per provider.
+- **Alerts go to a mock by default.** The notifier keeps the message in memory and the job writes an `outbox` row. The webhook notifier is tested only against a fake HTTP transport; it has never posted to a real chat or paging service.
+- **The triage is keyword rules.** `enrich.py` flags words like "leak" and "urgent". It will miss things and it will flag things it should not ("not urgent" is flagged). It is a placeholder for whatever classification you actually need.
+- **The data is synthetic.** 24 seed events, written by hand for the demo.
+
+What has not been proven:
+
+- **No load or concurrency testing.** Nothing here has been run under production load and no throughput has been measured. The suite passes on Postgres 16 in CI, but always with a single worker. The claim step is a conditional UPDATE (not `SKIP LOCKED`) that is meant to be safe with several workers; no test runs two workers at once.
+- **Jobs are at least once.** A handler can run twice after a crash, so handlers must be safe to repeat. The webhook notifier can deliver a duplicate if the process dies between the POST and the commit, and a job that outlives `JOB_VISIBILITY_TIMEOUT_SECONDS` is handed to a second worker.
+- **The queue is a table, polled.** One job at a time per worker, no priorities, no scheduling beyond `run_after`. It is not a replacement for a broker at high volume.
+- **SQLite is for the demo.** It has one writer at a time. Use Postgres for anything with more than one process.
+- **`/readyz` only sees the in process worker.** With `WORKER_ENABLED=false` and a separate `python -m app worker`, readiness does not know whether that worker is alive.
+
+What is missing:
+
 - **Auth is static API keys.** No per key scopes, no rotation endpoint, no rate limiting, no request size limit beyond the 500 event batch cap. Put it behind a reverse proxy that handles TLS and limits.
-- **Inbound webhooks are not signature checked.** Callers authenticate with an API key. If a provider signs its webhooks, verify that in the normaliser's route before trusting the payload.
+- **Inbound webhooks are not signature checked.** Callers authenticate with an API key only.
+- **Phone numbers assume North America.** A 10 digit number (or 11 digits starting with 1) without a `+` is stored as `+1...`; anything else needs the `+` and country code or the phone is dropped (the original stays in `raw`).
+- **No contact matching.** The same person arriving by text and by email is two unrelated rows; nothing links or merges contacts.
 - **Migrations are forward only**, and there is no data retention: `raw` payloads are kept forever unless you prune them.
-- **The test client prints a deprecation warning** about `httpx` on current Starlette. It is filtered in `pytest.ini`; the pinned versions in `requirements.txt` are the ones the suite passes on.
+- **Versions are pinned.** `requirements.txt` holds the versions the suite passes on. The test client prints an `httpx` deprecation warning on current Starlette, which is filtered in `pytest.ini`.
 
 License: MIT, see the LICENSE file.

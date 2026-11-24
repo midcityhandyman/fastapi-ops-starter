@@ -209,3 +209,25 @@ def test_json_formatter_includes_exception():
     line = json.loads(JsonFormatter().format(record))
     assert line["msg"] == "failed here" and "RuntimeError: boom" in line["exc"]
     assert "request_id" not in line
+
+
+def test_search_text_is_literal_not_a_wildcard(client):
+    for sid, body in (("q1", "50% deposit paid"), ("q2", "deposit paid in full")):
+        payload = {"message_sid": sid, "from": "+12025550111", "body": body, "timestamp": 1793628000}
+        assert client.post("/v1/ingest/sms", json=payload, headers=AUTH).status_code == 201
+
+    def found(q):
+        items = client.get("/v1/records", params={"q": q}, headers=AUTH).json()["items"]
+        return sorted(item["external_id"] for item in items)
+
+    assert found("DEPOSIT") == ["q1", "q2"]
+    assert found("50%") == ["q1"]
+    assert found("%") == ["q1"]
+    assert found("_") == []
+
+
+def test_out_of_range_timestamp_is_422_not_500(client):
+    payload = {"message_sid": "big", "from": "+12025550111", "body": "x", "timestamp": 1e30}
+    response = client.post("/v1/ingest/sms", json=payload, headers=AUTH)
+    assert response.status_code == 422
+    assert "out of range" in response.json()["detail"]["problems"][0]

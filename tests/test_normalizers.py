@@ -149,3 +149,11 @@ def test_parse_timestamp_variants():
 )
 def test_classify(event_type, summary, priority, tags):
     assert classify(event_type, summary) == (priority, tags)
+
+
+@pytest.mark.parametrize("value", [1e30, -1e30, float("inf"), float("nan"), "99999999999999999999999", "9999-12-31T23:59:59-23:00"])
+def test_out_of_range_timestamp_is_rejected_not_a_crash(value):
+    with pytest.raises(ValueError):
+        parse_timestamp(value)
+    with pytest.raises(NormalizationError):
+        normalize("sms", {"message_sid": "SM9", "from": "+12025550111", "body": "x", "timestamp": value})

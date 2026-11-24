@@ -171,3 +171,17 @@ def test_seed_is_idempotent_and_flows_through_jobs(engine, settings):
     ran = Worker(engine, settings, notifier).drain()
     assert ran == 24 + len(notifier.sent)
     assert len(notifier.sent) >= 5
+
+
+def test_readme_excerpt_matches_captured_demo_output():
+    """The proof block at the top of the README is real demo output, in order."""
+    root = MIGRATIONS_DIR.parent
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    block = readme.split("## What you will see", 1)[1].split("```text", 1)[1].split("```", 1)[0]
+    captured = (root / "demo" / "output.txt").read_text(encoding="utf-8").splitlines()
+    quoted = [line for line in block.splitlines() if line.strip()]
+    assert len(quoted) >= 10
+    position = 0
+    for line in quoted:
+        assert line in captured[position:], f"README quotes a line the demo did not print: {line!r}"
+        position = captured.index(line, position) + 1

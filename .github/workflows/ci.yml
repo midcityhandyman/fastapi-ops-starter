@@ -12,15 +12,17 @@ jobs:
     name: tests and demo (SQLite)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
       - run: pip install -r requirements-dev.txt
       - run: python -m pytest
-      - name: Offline demo runs clean
-        run: python demo/run_demo.py
+      - name: Offline demo runs and matches the captured output
+        run: |
+          python demo/run_demo.py > demo-run.txt
+          diff demo-run.txt demo/output.txt
 
   postgres:
     name: tests (Postgres)
@@ -42,8 +44,8 @@ jobs:
     env:
       TEST_DATABASE_URL: postgresql://ops:ci-only-password@localhost:5432/ops_test
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip

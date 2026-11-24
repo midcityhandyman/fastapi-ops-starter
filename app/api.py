@@ -214,7 +214,8 @@ def list_records(
         except ValueError as exc:
             raise HTTPException(422, detail=str(exc)) from None
     if q:
-        conditions.append(records.c.summary.ilike(f"%{q}%"))
+        # autoescape: "%" and "_" in the search text are literal, not wildcards.
+        conditions.append(records.c.summary.icontains(q, autoescape=True))
     with _engine(request).connect() as conn:
         total = conn.execute(select(func.count()).select_from(records).where(*conditions)).scalar_one()
         rows = conn.execute(

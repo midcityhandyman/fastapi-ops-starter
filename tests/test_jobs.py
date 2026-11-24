@@ -192,6 +192,20 @@ def test_stale_running_jobs_are_requeued(engine):
     assert job["status"] == "queued" and job["locked_at"] is None
 
 
+def test_stale_job_out_of_attempts_goes_dead_instead_of_looping(engine):
+    with engine.begin() as conn:
+        job_id = enqueue(conn, "a", {}, now=T0, max_attempts=2)
+    now = T0
+    for _ in range(2):  # the worker dies while holding the job, twice
+        assert claim_next(engine, now)["id"] == job_id
+        now += timedelta(seconds=301)
+        requeue_stale(engine, now, 300)
+    job = _job(engine, job_id)
+    assert job["status"] == "dead" and job["attempts"] == 2
+    assert job["finished_at"] == now and "attempts exhausted" in job["last_error"]
+    assert claim_next(engine, now) is None
+
+
 def test_backoff_is_exponential_and_capped():
     assert [backoff_seconds(5, n) for n in (1, 2, 3, 4)] == [5, 10, 20, 40]
     assert backoff_seconds(5, 40) == 3600

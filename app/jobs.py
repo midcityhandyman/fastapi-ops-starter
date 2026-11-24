@@ -2,8 +2,8 @@
 
 There is no broker. Jobs are rows in the ``jobs`` table, written in the same
 transaction as the data they belong to. A worker claims one job at a time
-with a conditional UPDATE, which is safe with several workers on both SQLite
-and Postgres.
+with a conditional UPDATE, which is meant to be safe with several workers on SQLite
+and Postgres (the tests only ever run one worker at a time).
 
 Delivery is at least once: a handler can run again after a crash or a
 failure, so handlers must be safe to repeat.
@@ -103,12 +103,28 @@ def claim_next(engine: Engine, now: datetime) -> dict[str, Any] | None:
 
 
 def requeue_stale(engine: Engine, now: datetime, visibility_timeout_seconds: float) -> int:
-    """Return jobs to the queue whose worker died while holding them."""
+    """Return jobs to the queue whose worker died while holding them.
+
+    A job that has already used its attempt budget goes to dead instead, so a
+    job that kills its worker every time cannot loop forever. Returns how many
+    jobs were put back on the queue.
+    """
     cutoff = now - timedelta(seconds=visibility_timeout_seconds)
+    stale = (jobs.c.status == RUNNING, jobs.c.locked_at < cutoff)
     with engine.begin() as conn:
+        conn.execute(
+            update(jobs)
+            .where(*stale, jobs.c.attempts >= jobs.c.max_attempts)
+            .values(
+                status=DEAD,
+                finished_at=now,
+                locked_at=None,
+                last_error="worker lost the job; attempts exhausted",
+            )
+        )
         result = conn.execute(
             update(jobs)
-            .where(jobs.c.status == RUNNING, jobs.c.locked_at < cutoff)
+            .where(*stale)
             .values(status=QUEUED, locked_at=None, last_error="worker lost the job; requeued")
         )
     return result.rowcount or 0

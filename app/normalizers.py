@@ -54,7 +54,11 @@ def parse_timestamp(value: Any) -> datetime:
         seconds = float(value)
         if seconds > 1e11:  # milliseconds
             seconds /= 1000.0
-        return datetime.fromtimestamp(seconds, tz=timezone.utc)
+        try:
+            return datetime.fromtimestamp(seconds, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError) as exc:
+            # A number no calendar can hold is bad input, not a server error.
+            raise ValueError(f"timestamp out of range: {value!r}") from exc
     text = str(value).strip()
     if not text:
         raise ValueError("timestamp is empty")
@@ -69,7 +73,10 @@ def parse_timestamp(value: Any) -> datetime:
             raise ValueError(f"timestamp not understood: {text!r}") from exc
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+    try:
+        return parsed.astimezone(timezone.utc)
+    except (OverflowError, ValueError) as exc:
+        raise ValueError(f"timestamp out of range: {text!r}") from exc
 
 
 def normalize_phone(value: str | None) -> str | None:
